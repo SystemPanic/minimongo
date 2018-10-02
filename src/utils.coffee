@@ -201,7 +201,7 @@ exports.filterFields = (items, fields={}) ->
 
 # Creates a unique identifier string
 exports.createUid = ->
-  'xxxxxxxxxxxx4xxxyxxxxxxxxxxxxxxx'.replace(/[xy]/g, (c) ->
+  'xxxxxxxx4xxxyxxxxxxxxxxx'.replace(/[xy]/g, (c) ->
     r = Math.random()*16|0
     v = if c == 'x' then r else (r&0x3|0x8)
     return v.toString(16)
