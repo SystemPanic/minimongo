@@ -6,6 +6,11 @@ bowser = require 'bowser'
 compileDocumentSelector = require('./selector').compileDocumentSelector
 compileSort = require('./selector').compileSort
 
+booleanPointInPolygon = require("@turf/boolean-point-in-polygon").default
+intersect = require("@turf/intersect").default
+booleanCrosses = require("@turf/boolean-crosses").default
+booleanWithin = require("@turf/boolean-within").default
+
 # Test window.localStorage
 isLocalStorageSupported = ->
   if not window.localStorage
@@ -16,7 +21,6 @@ isLocalStorageSupported = ->
     return true
   catch e
     return false
-
 
 # Compile a document selector (query) to a lambda function
 exports.compileDocumentSelector = compileDocumentSelector
@@ -38,12 +42,25 @@ exports.autoselectLocalDb = (options, success, error) ->
 
   # Always use WebSQL in cordova
   if window.cordova
-    console.log "Selecting WebSQLDb for Cordova"
-    # WebSQLDb must success in Cordova
-    return new WebSQLDb options, success, error
+    if window.device?.platform == "iOS" and window.sqlitePlugin
+      console.log "Selecting WebSQLDb(sqlite) for Cordova"
+      options.storage = 'sqlite'
+      return new WebSQLDb options, success, error
+    else
+      console.log "Selecting else WebSQLDb for Cordova"
+      # WebSQLDb must success in Cordova
+      return new WebSQLDb options, success, error
 
-  # Use WebSQL in Android, iOS, Chrome, Safari, Opera, Blackberry
-  if browser.android or browser.ios or browser.chrome or browser.safari or browser.opera or browser.blackberry
+  # Use IndexedDb for ios, Safari
+  if browser.ios or browser.safari
+    # Fallback to IndexedDb
+    return new IndexedDb options, success, (err) =>
+      console.log "Failed to create IndexedDb: " + (if err then err.message)
+      # Create memory db instead
+      return new MemoryDb(options, success)
+
+  # Use WebSQL in Android, Chrome,  Opera, Blackberry
+  if browser.android or browser.chrome or browser.opera or browser.blackberry
     console.log "Selecting WebSQLDb for browser"
     return new WebSQLDb options, success, (err) =>
       console.log "Failed to create WebSQLDb: " + (if err then err.message)
@@ -115,6 +132,32 @@ exports.cloneLocalDb = (fromDb, toDb, success, error) ->
       return error(err)
 
     success()
+
+# Clone a local database collection's caches, pending upserts and removes from one database to another
+# Useful for making a replica
+exports.cloneLocalCollection = (fromCol, toCol, success, error) ->
+  # Get all items
+  fromCol.find({}).fetch (items) =>
+    # Seed items
+    toCol.seed items, =>
+      # Copy upserts
+      fromCol.pendingUpserts (upserts) =>
+        toCol.upsert _.pluck(upserts, "doc"), _.pluck(upserts, "base"), =>
+          # Copy removes
+          fromCol.pendingRemoves (removes) =>
+            async.eachSeries removes, (remove, cb2) =>
+              toCol.remove remove, () =>
+                cb2()
+              , cb2
+            , (err) =>
+              if err
+                return error(err)
+              success()
+          , error
+        , error
+      , error
+    , error
+  , error
 
 # Processes a find with sorting and filtering and limiting
 exports.processFind = (items, selector, options) ->
@@ -238,26 +281,11 @@ processNearOperator = (selector, list) ->
       list = _.pluck distances, 'doc'
   return list
 
-# Very simple polygon check. Assumes that is a square
 pointInPolygon = (point, polygon) ->
-  # Check that first == last
-  if not _.isEqual(_.first(polygon.coordinates[0]), _.last(polygon.coordinates[0]))
-    throw new Error("First must equal last")
+  return booleanPointInPolygon(point, polygon)
 
-  # Check bounds
-  if point.coordinates[0] < Math.min.apply(this,
-      _.map(polygon.coordinates[0], (coord) -> coord[0]))
-    return false
-  if point.coordinates[1] < Math.min.apply(this,
-      _.map(polygon.coordinates[0], (coord) -> coord[1]))
-    return false
-  if point.coordinates[0] > Math.max.apply(this,
-      _.map(polygon.coordinates[0], (coord) -> coord[0]))
-    return false
-  if point.coordinates[1] > Math.max.apply(this,
-      _.map(polygon.coordinates[0], (coord) -> coord[1]))
-    return false
-  return true
+polygonIntersection = (polygon1, polygon2) ->
+  return intersect(polygon1, polygon2)?
 
 # From http://www.movable-type.co.uk/scripts/latlong.html
 getDistanceFromLatLngInM = (lat1, lng1, lat2, lng2) ->
@@ -276,17 +304,30 @@ processGeoIntersectsOperator = (selector, list) ->
   for key, value of selector
     if value? and value['$geoIntersects']
       geo = value['$geoIntersects']['$geometry']
+      # Can only test intersection with polygon
       if geo.type != 'Polygon'
         break
 
       # Check within for each
       list = _.filter list, (doc) ->
-        # Reject non-points
-        if not doc[key] or doc[key].type != 'Point'
+        # Ignore if null
+        if not doc[key]
           return false
 
-        # Check polygon
-        return pointInPolygon(doc[key], geo)
+        # Check point or polygon
+        if doc[key].type == 'Point'
+          return pointInPolygon(doc[key], geo)
+        else if doc[key].type in ["Polygon", "MultiPolygon"]
+          return polygonIntersection(doc[key], geo)
+        else if doc[key].type == "LineString"
+          return booleanCrosses(doc[key], geo) or booleanWithin(doc[key], geo)
+        else if doc[key].type == "MultiLineString"
+          # Bypass deficiencies in turf.js by splitting it up
+          for line in doc[key].coordinates
+            lineGeo = { type: "LineString", coordinates: line }
+            if booleanCrosses(lineGeo, geo) or booleanWithin(lineGeo, geo)
+              return true
+          return false
 
   return list
 

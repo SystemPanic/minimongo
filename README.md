@@ -8,6 +8,8 @@ It is either IndexedDb backed (IndexedDb), WebSQL backed (WebSQLDb), Local stora
 
 Autoselection is possible with `utils.autoselectLocalDb(options, success, error)`. success is called with the selected database.
 
+[sqlite plugin](https://github.com/xpbrew/cordova-sqlite-storage) is also supported when available, activate sqlite plugin with option {storage: 'sqlite'} in utils.autoselectLocalDb
+
 ## Usage
 
 Minimongo is designed to be used with [browserify](http://browserify.org/) or Webpack
@@ -153,7 +155,7 @@ Then query the hybridDb (`find` and `findOne`) to have it get results and correc
 
 When upserts and removes are done on the HybridDb, they are queued up in the LocalDb until `hybridDb.upload(success, error)` is called.
 
-`upload` will go through each collection and send any upserts or removes to the remoteDb.
+`upload` will go through each collection and send any upserts or removes to the remoteDb. You must call this to have the results go to the server! Calling periodically (e.g every 5 seconds) is safe as long as you wait for one upload call to complete before calling again.
 
 `findOne` will not return an interim `null` result, but will only return interim results when one is present.
 
@@ -180,6 +182,20 @@ The API that RemoteDb should support four HTTP methods for each collection:
 #### GET `/<collection>`
 
 Performs a query, returning an array of results. GET query parameters are:
+
+**selector** (optional) : JSON of query, in MongoDB format. e.g. `{"a": 1}` to find records with field `a` having value `1`
+**fields** (optional) : JSON object indicating which fields to return in MongoDB format. e.g. `{"a": 1}` to return only field `a` and `_id`
+**sort** (optional) : JSON of MongoDB sort field. e.g. `["a"]` to sort ascending by `a`, or `[["a","desc"]]` to sort descending by `a`
+**limit** (optional) : Maximum records to return e.g. `100`
+
+Possible HTTP response codes:
+
+**200** : normal response
+**401** : client was invalid
+
+#### POST `/<collection>/find` (optionally implemented)
+
+Performs a query, returning an array of results. POST body parameters are:
 
 **selector** (optional) : JSON of query, in MongoDB format. e.g. `{"a": 1}` to find records with field `a` having value `1`
 **fields** (optional) : JSON object indicating which fields to return in MongoDB format. e.g. `{"a": 1}` to return only field `a` and `_id`
@@ -262,3 +278,10 @@ It can also be used with a simple server that just overwrites documents complete
 To test, run `testem` in the main directory.
 
 To test a RemoteDb implementation, use `test/LiveRemoteDbTests.coffee`. Server must have a collection called scratch with fields as specified at top of tests file.
+
+
+### Quickfind
+
+Finds can be very wasteful when the client has large collections already cached. The quickfind protocol shards the existing docs on the client by
+id and then sends a hash of them to the server, which just responds with the changed ones. See src/quickfind.coffee for more details. It needs to be 
+enabled and is off by default.
